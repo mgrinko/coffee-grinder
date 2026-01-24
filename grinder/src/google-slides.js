@@ -145,8 +145,9 @@ export async function addSlide(event) {
 
   // Важно:
   // 1) СНАЧАЛА duplicateObject с маппингом templateTableId -> newTableId
-  // 2) Потом updateTextStyle на newTableId
-  // 3) updateSlidesPosition должен двигать newSlideId, а не templateSlideId
+  // 2) Потом замены текста
+  // 3) Потом updateTextStyle на newTableId (после замены текста)
+  // 4) updateSlidesPosition должен двигать newSlideId, а не templateSlideId
   const requests = [
     {
       duplicateObject: {
@@ -154,25 +155,6 @@ export async function addSlide(event) {
         objectIds: {
           [templateSlideId]: newSlideId,
           [templateTableId]: newTableId
-        }
-      }
-    },
-    {
-      updateTextStyle: {
-        fields: 'link',
-        objectId: newTableId,
-        cellLocation: {
-          rowIndex: 0,
-          columnIndex: 0
-        },
-        // Применяем ссылку ко всему тексту ячейки, чтобы не ловить выход за диапазон
-        textRange: {
-          type: 'ALL'
-        },
-        style: {
-          link: {
-            url: linkUrl
-          }
         }
       }
     },
@@ -188,6 +170,27 @@ export async function addSlide(event) {
         containsText: { text: `{{cat${event.topicId}_card${event.topicSqk}}}` },
         replaceText: String(`${event.sqk ?? ''} ${title}`),
         // Без pageObjectIds: обновляет общий “каталог/оглавление”, если он есть в презентации
+      }
+    },
+    {
+      updateTextStyle: {
+        fields: 'link',
+        objectId: newTableId,
+        cellLocation: {
+          rowIndex: 0,
+          columnIndex: 0
+        },
+        // Применяем ссылку только к заголовку
+        textRange: {
+          type: 'FIXED_RANGE',
+          startIndex: 0,
+          endIndex: title.length
+        },
+        style: {
+          link: {
+            url: linkUrl
+          }
+        }
       }
     },
     {

@@ -10,7 +10,6 @@ export async function fetchArticle(url) {
 				return await response.text()
 			} else {
 				log('article fetch failed', response.status, response.statusText)
-				return
 			}
 		} catch(e) {
 			log('article fetch failed', e)

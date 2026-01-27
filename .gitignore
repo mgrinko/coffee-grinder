@@ -1,13 +1,16 @@
-service-account.json
-screenshots.txt
-grinder/articles/*.html
-grinder/articles/*.txt
-audio/*.mp3
-**/*.log
-node_modules/
-.npm
+/tmp
+/out-tsc
+
+/node_modules
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+/.pnp
+.pnp.js
+.idea
 .env
-bin
+.DS_Store
+.vscode/*
 
 # JetBrain IDEs
 .idea

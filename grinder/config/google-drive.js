@@ -1,6 +1,10 @@
 export let rootFolderId = '1nJnHBcY252xqV0JDIidsxxhJkY6-w2WO'
-export let mainSpreadsheetId = '19Bt7Kov-1lUfc3bOJ-dNkBcTkQPhLMV2W135x0nlctA'
-export let autoSpreadsheetId = '1aTs8t6wp3Ag7yryH2wci_ETdtNWmDu0ePyf-jLdY9NQ'
+export let mainSpreadsheetId =
+	process.env.GOOGLE_SHEET_ID_MAIN ||
+	'19Bt7Kov-1lUfc3bOJ-dNkBcTkQPhLMV2W135x0nlctA'
+export let autoSpreadsheetId =
+	process.env.GOOGLE_SHEET_ID_AUTO ||
+	'1aTs8t6wp3Ag7yryH2wci_ETdtNWmDu0ePyf-jLdY9NQ'
 export let newsSheet = 'news'
 export let aiSheet = 'ai-instructions'
 export let templatePresentationId = '1Rm5WnQRnEMmw6XDMRIX8l-BZIlt5Sz5CBBtRrzjvpak'

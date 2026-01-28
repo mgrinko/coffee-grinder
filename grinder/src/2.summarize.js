@@ -28,8 +28,8 @@ function normalizeKey(value) {
 	if (!value) return ''
 	return value
 		.toLowerCase()
-		.replace(/[’'"`.]/g, '')
-		.replace(/[-–—]/g, ' ')
+		.replace(/[\u2019'"`.]/g, '')
+		.replace(/[\u2013\u2014-]/g, ' ')
 		.replace(/^the\s+/, '')
 		.replace(/\s+/g, ' ')
 		.trim()

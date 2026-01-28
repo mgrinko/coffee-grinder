@@ -11,7 +11,8 @@
     "slides": "node -r dotenv/config --no-warnings --experimental-fetch src/3.slides",
     "screenshots": "node -r dotenv/config --no-warnings --experimental-fetch src/screenshots",
     "upload-img": "node -r dotenv/config --no-warnings --experimental-fetch src/upload-img",
-    "audio": "node -r dotenv/config --no-warnings --experimental-fetch src/4.audio"
+    "audio": "node -r dotenv/config --no-warnings --experimental-fetch src/4.audio",
+    "add-missed": "node -r dotenv/config --no-warnings --experimental-fetch src/5.add-missed"
   },
   "keywords": [],
   "author": "",

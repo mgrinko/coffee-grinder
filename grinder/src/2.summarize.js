@@ -636,7 +636,10 @@ function truncate(text, max = 220) {
 
 async function decodeUrl(gnUrl, last) {
 	await sleep(last.urlDecode.time + last.urlDecode.delay - Date.now())
-	last.urlDecode.delay += last.urlDecode.increment
+	let maxDelay = Number.isFinite(last.urlDecode.maxDelay)
+		? last.urlDecode.maxDelay
+		: last.urlDecode.delay
+	last.urlDecode.delay = Math.min(last.urlDecode.delay + last.urlDecode.increment, maxDelay)
 	last.urlDecode.time = Date.now()
 	log('Decoding URL...')
 	if (!gnUrl) return ''
@@ -801,6 +804,10 @@ async function fetchTextWithRetry(event, url, last, { isFallback = false } = {})
 			}, `#${event.id} fetch no text (${attempt}/${fetchAttempts})`, 'warn')
 		}
 
+		if (mismatchResult && !summarizeConfig.browseOnMismatch) {
+			return { ok: false, mismatch: true, verify: mismatchResult, html: mismatchHtml, text: mismatchText }
+		}
+
 		html = await browseArticle(url)
 		text = extractText(html)
 		if (text) {
@@ -881,7 +888,7 @@ export async function summarize() {
 	let failures = []
 	let externalSearchWarned = false
 	let last = {
-		urlDecode: { time: 0, delay: 30e3, increment: 1000 },
+		urlDecode: { time: 0, delay: 30e3, increment: 1000, maxDelay: 60e3 },
 		ai: { time: 0, delay: 0 },
 		verify: { time: 0, delay: 1000 },
 		gnSearch: { time: 0, delay: 1000, increment: 0 },

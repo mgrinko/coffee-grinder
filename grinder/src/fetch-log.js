@@ -1,4 +1,5 @@
 import fs from 'fs'
+import path from 'path'
 
 import { log } from './log.js'
 import { logging } from '../config/logging.js'
@@ -40,7 +41,12 @@ export function logFetch(data, message, level = 'info') {
 				message,
 				...safeData,
 			})
-			fs.appendFileSync(logFile, line + '\n')
+			try {
+				fs.mkdirSync(path.dirname(logFile), { recursive: true })
+				fs.appendFileSync(logFile, line + '\n')
+			} catch (error) {
+				log('[warn]', `fetch log write failed: ${error?.message || error}`)
+			}
 		}
 		if (logging.fetchJson) {
 			log(prefix, JSON.stringify(safeData))

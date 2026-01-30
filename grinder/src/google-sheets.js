@@ -83,7 +83,7 @@ export async function saveTable(spreadsheetId, range, data) {
 			log(`Oversized cell log truncated (${oversize.length - sheetsConfig.oversizeLogLimit} more)`)
 		}
 		if (!dropOversize) {
-			throw new Error('Oversized cell(s) exceed Google Sheets limit. Set SHEETS_DROP_OVERSIZE=1 to drop.')
+			throw new Error('Oversized cell(s) exceed Google Sheets limit. Set SHEETS_DROP_OVERSIZE=1 or sheetsConfig.dropOversize to drop.')
 		}
 	}
 	// log({ updatedData })

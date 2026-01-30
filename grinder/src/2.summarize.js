@@ -85,4 +85,11 @@ export async function summarize() {
 	log('\n', stats)
 }
 
-if (process.argv[1].endsWith('summarize')) summarize()
+if (process.argv[1].endsWith('summarize')) {
+  (async () => {
+    disableAutoSave();
+    await summarize();
+    await save();
+    enableAutoSave();
+  })();
+}

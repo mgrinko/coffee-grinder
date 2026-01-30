@@ -77,13 +77,33 @@ function isGoogleNewsUrl(url) {
 
 function decodeHtmlEntities(value) {
 	if (!value) return ''
-	return value
+	let text = String(value)
+	text = text
 		.replace(/&amp;/gi, '&')
 		.replace(/&quot;/gi, '"')
 		.replace(/&#39;|&#x27;/gi, "'")
 		.replace(/&lt;/gi, '<')
 		.replace(/&gt;/gi, '>')
 		.replace(/&nbsp;/gi, ' ')
+	text = text.replace(/&#x([0-9a-f]+);/gi, (match, hex) => {
+		let code = Number.parseInt(hex, 16)
+		if (!Number.isFinite(code)) return match
+		try {
+			return String.fromCodePoint(code)
+		} catch {
+			return match
+		}
+	})
+	text = text.replace(/&#(\d+);/g, (match, dec) => {
+		let code = Number.parseInt(dec, 10)
+		if (!Number.isFinite(code)) return match
+		try {
+			return String.fromCodePoint(code)
+		} catch {
+			return match
+		}
+	})
+	return text
 }
 
 function extractTitleFromHtml(html) {
@@ -135,12 +155,44 @@ function backfillMetaFromDisk(event) {
 	return changed
 }
 
+function backfillTextFromDisk(event) {
+	if (event?.text?.length) return false
+	let txtPath = `articles/${event.id}.txt`
+	if (!fs.existsSync(txtPath)) return false
+	let raw = fs.readFileSync(txtPath, 'utf8')
+	if (!raw) return false
+	let [, text] = raw.split(/\n\n/, 2)
+	let trimmed = (text || raw).trim()
+	if (!trimmed) return false
+	event.text = trimmed.slice(0, 30000)
+	return true
+}
+
 function getArticleLink(article) {
 	return normalizeUrl(article?.gnUrl || article?.url)
 }
 
 function isBlank(value) {
 	return !value || String(value).trim().length === 0
+}
+
+const requiredFields = [
+	'gnUrl',
+	'url',
+	'source',
+	'titleEn',
+	'titleRu',
+	'summary',
+	'topic',
+	'priority',
+]
+
+function missingFields(event) {
+	return requiredFields.filter(field => isBlank(event?.[field]))
+}
+
+function isComplete(event) {
+	return missingFields(event).length === 0
 }
 
 function parseArticlesValue(value) {
@@ -208,8 +260,8 @@ function parseGoogleNewsXml(xml) {
 }
 
 function buildSearchQuery(event) {
-	if (!isBlank(event.titleEn)) return `"${event.titleEn}"`
-	if (!isBlank(event.titleRu)) return `"${event.titleRu}"`
+	let title = normalizeTitleForSearch(event.titleEn) || normalizeTitleForSearch(event.titleRu)
+	if (!isBlank(title)) return `"${title}"`
 	if (!isBlank(event.url)) {
 		try {
 			let parsed = new URL(event.url)
@@ -226,7 +278,12 @@ function buildSearchQuery(event) {
 
 function normalizeTitleForSearch(title) {
 	if (!title) return ''
-	let cleaned = title.replace(/\s+\|\s+.*$/, '').replace(/\s+-\s+[^-]+$/, '')
+	let cleaned = decodeHtmlEntities(title)
+		.replace(/[“”„«»]/g, '"')
+		.replace(/[‘’]/g, "'")
+		.replace(/"/g, '')
+		.replace(/\s+\|\s+.*$/, '')
+		.replace(/\s+-\s+[^-]+$/, '')
 	return cleaned.trim()
 }
 
@@ -641,7 +698,7 @@ function applyVerifyStatus(event, verify) {
 	if (!verify) return
 	let status = verify.status
 	if (status === 'ok' || status === 'unverified' || status === 'skipped') {
-		event[verifyStatusColumn] = status
+		event._verifyStatus = status
 	}
 }
 
@@ -895,12 +952,7 @@ export async function summarize() {
 			verifyStatusColumn,
 		])
 
-		let list = news.filter(e => {
-			if (String(e[verifyStatusColumn] || '').toLowerCase() === 'ok') return false
-			if (!summarizeConfig.includeOtherTopics && e.topic === 'other') return false
-			if (summarizeConfig.forceResummarize) return true
-			return !e.summary
-		})
+		let list = news.filter(e => String(e[verifyStatusColumn] || '').toLowerCase() !== 'ok')
 
 		let stats = { ok: 0, fail: 0 }
 		let failures = []
@@ -922,13 +974,44 @@ export async function summarize() {
 			let e = cloneEvent(base)
 			let rowIndex = news.indexOf(base) + 1
 			if (!e.id) e.id = base.id || rowIndex
-				if (backfillMetaFromDisk(e)) backfilled++
+			if (backfillMetaFromDisk(e)) backfilled++
+			backfillTextFromDisk(e)
+			if (isBlank(e.gnUrl)) {
 				if (await backfillGnUrl(e, last)) backfilledGn++
-				e.url = normalizeUrl(e.url)
-				e.gnUrl = normalizeUrl(e.gnUrl)
+			}
+			if (isBlank(e.gnUrl) || isBlank(e.titleEn) || isBlank(e.source)) {
 				await hydrateFromGoogleNews(e, last)
-				log(`\n#${e.id} [${i + 1}/${list.length}]`, titleFor(e))
+			}
+			e.url = normalizeUrl(e.url)
+			e.gnUrl = normalizeUrl(e.gnUrl)
+			let needsTextFields = isBlank(e.summary) || isBlank(e.titleRu) || isBlank(e.topic) || isBlank(e.priority)
+			let hasText = e.text?.length > minTextLength
+			log(`
+#${e.id} [${i + 1}/${list.length}]`, titleFor(e))
 
+			if ((hasText || !needsTextFields) && isBlank(e.url) && !isBlank(e.gnUrl)) {
+				let decoded = await decodeUrl(e.gnUrl, last)
+				if (decoded) {
+					e.url = decoded
+					logEvent(e, {
+						phase: 'decode_url',
+						status: 'ok',
+						url: e.url,
+					}, `#${e.id} url decoded`, 'ok')
+				} else {
+					logEvent(e, {
+						phase: 'decode_url',
+						status: 'fail',
+					}, `#${e.id} url decode failed`, 'warn')
+				}
+			}
+
+			if (isBlank(e.source) && e.url && !e.url.includes('news.google.com')) {
+				let inferred = sourceFromUrl(e.url)
+				if (inferred) e.source = inferred
+			}
+
+			if (needsTextFields && !hasText) {
 				if (!e.url /*&& !restricted.includes(e.source)*/) {
 					e.url = await decodeUrl(e.gnUrl, last)
 					if (!e.url) {
@@ -959,6 +1042,9 @@ export async function summarize() {
 					if (result?.ok) {
 						log('got', result.text.length, 'chars')
 						saveArticle(e, result.html, result.text)
+						if (isBlank(e.gnUrl)) {
+							await backfillGnUrl(e, last)
+						}
 						applyVerifyStatus(e, result.verify)
 						fetched = true
 					} else if (result?.mismatch) {
@@ -973,6 +1059,10 @@ export async function summarize() {
 
 				if (!fetched) {
 					let alternatives = getAlternativeArticles(e)
+					if (!alternatives.length) {
+						await hydrateFromGoogleNews(e, last)
+						alternatives = getAlternativeArticles(e)
+					}
 					let shouldExpand = shouldExpandAlternatives(e, alternatives)
 					let shouldExternal = shouldExternalSearch(alternatives)
 					let externalResults = []
@@ -1108,12 +1198,15 @@ export async function summarize() {
 						}, `#${e.id} fallback url decoded (${alt.source})`, 'ok')
 						let result = await fetchTextWithRetry(e, altUrl, last, { isFallback: true })
 						if (result?.ok) {
-							if (alt.source) e.source = alt.source
-							if (!isBlank(alt.gnUrl)) e.gnUrl = alt.gnUrl
+							if (isBlank(e.source) && alt.source) e.source = alt.source
+							if (isBlank(e.gnUrl) && !isBlank(alt.gnUrl)) e.gnUrl = alt.gnUrl
 							if (isBlank(e.titleEn) && !isBlank(alt.titleEn)) e.titleEn = alt.titleEn
-							e.url = altUrl
+							if (isBlank(e.url)) e.url = altUrl
 							log('got', result.text.length, 'chars')
 							saveArticle(e, result.html, result.text)
+							if (isBlank(e.gnUrl)) {
+								await backfillGnUrl(e, last)
+							}
 							applyVerifyStatus(e, result.verify)
 							fetched = true
 							logEvent(e, {
@@ -1142,63 +1235,63 @@ export async function summarize() {
 					}
 				}
 
-				if (e.text?.length > minTextLength) {
-					await sleep(last.ai.time + last.ai.delay - Date.now())
-					last.ai.time = Date.now()
-					log('Summarizing', e.text.length, 'chars...')
-					let res = await ai(e)
-					if (res) {
-						last.ai.delay = res.delay
-						e.topic ||= topicsMap[res.topic]
-						e.priority ||= res.priority
-						e.titleRu ||= res.titleRu
-						e.summary = res.summary
-						e.aiTopic = topicsMap[res.topic]
-						e.aiPriority = res.priority
-					}
-				}
+			}
 
-				if (!e.summary) {
-					logEvent(e, {
-						phase: 'summary',
-						status: 'missing',
-					}, `#${e.id} summary missing`, 'warn')
-					if (String(e[verifyStatusColumn] || '').toLowerCase() === 'ok') {
-						e[verifyStatusColumn] = ''
-					}
-					failures.push({
-						id: e.id,
-						title: titleFor(e),
-						source: e.source || '',
-						url: e.url || '',
-						phase: e._lastPhase || '',
-						status: e._lastStatus || '',
-						method: e._lastMethod || '',
-						reason: e._lastReason || '',
-					})
-					stats.fail++
-					commitEvent(base, e)
-					if (rowIndex > 0) {
-						await saveRowByIndex(rowIndex + 1, base)
-					} else {
-						log(`[warn] #${e.id} row index not found; save skipped`)
-					}
-				} else {
-					stats.ok++
-					commitEvent(base, e)
-					if (rowIndex > 0) {
-						await saveRowByIndex(rowIndex + 1, base)
-					} else {
-						log(`[warn] #${e.id} row index not found; save skipped`)
-					}
+			if (needsTextFields && e.text?.length > minTextLength) {
+				await sleep(last.ai.time + last.ai.delay - Date.now())
+				last.ai.time = Date.now()
+				log('Summarizing', e.text.length, 'chars...')
+				let res = await ai(e)
+				if (res) {
+					last.ai.delay = res.delay
+					e.topic ||= topicsMap[res.topic]
+					e.priority ||= res.priority
+					e.titleRu ||= res.titleRu
+					if (isBlank(e.summary)) e.summary = res.summary
+					if (isBlank(e.aiTopic)) e.aiTopic = topicsMap[res.topic]
+					if (isBlank(e.aiPriority)) e.aiPriority = res.priority
 				}
+			}
+
+			if (!e.summary) {
+				logEvent(e, {
+					phase: 'summary',
+					status: 'missing',
+				}, `#${e.id} summary missing`, 'warn')
+			}
+			if (isBlank(e.gnUrl) && !isBlank(base.gnUrl)) {
+				e.gnUrl = base.gnUrl
+			}
+			let missing = missingFields(e)
+			let complete = missing.length === 0
+			e[verifyStatusColumn] = complete ? 'ok' : ''
+			if (!complete) {
+				failures.push({
+					id: e.id,
+					title: titleFor(e),
+					source: e.source || '',
+					url: e.url || '',
+					phase: e._lastPhase || '',
+					status: e._lastStatus || '',
+					method: e._lastMethod || '',
+					reason: missing.length ? `missing: ${missing.join(', ')}` : (e._lastReason || ''),
+				})
+			}
+			if (complete) stats.ok++
+			else stats.fail++
+			commitEvent(base, e)
+			if (rowIndex > 0) {
+				await saveRowByIndex(rowIndex + 1, base)
+			} else {
+				log(`[warn] #${e.id} row index not found; save skipped`)
+			}
 		}
 		let order = e => (+e.sqk || 999) * 1000 + (topics[e.topic]?.id ?? 99) * 10 + (+e.priority || 10)
 		news.sort((a, b) => order(a) - order(b))
 
 		if (failures.length) {
 			let limit = summarizeConfig.failSummaryLimit || 0
-			log('\nFailed summaries:', failures.length)
+			log('\nFailed rows:', failures.length)
 			let items = limit > 0 ? failures.slice(0, limit) : failures
 			for (let item of items) {
 				let meta = [item.phase, item.status, item.method].filter(Boolean).join('/')

@@ -5,6 +5,7 @@ import { fileURLToPath } from 'url'
 
 import { log } from './log.js'
 import { sleep } from './sleep.js'
+import { isDomainInCooldown } from './domain-cooldown.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -78,6 +79,11 @@ export async function browseArticle(url) {
 
 		if (!html) {
 			log('browsing source...')
+			let cooldown = isDomainInCooldown(url)
+			if (cooldown) {
+				log('domain cooldown active', cooldown.host, Math.ceil(cooldown.remainingMs / 1000), 's')
+				return ''
+			}
 			try {
 				await page.goto(url, {
 					waitUntil: 'load',

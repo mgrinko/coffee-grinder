@@ -4,7 +4,7 @@ import { JSDOM, VirtualConsole } from 'jsdom'
 
 import { log } from './log.js'
 import { sleep } from './sleep.js'
-import { news } from './store.js'
+import { news, pauseAutoSave, resumeAutoSave, saveRowByIndex } from './store.js'
 import { topics, topicsMap } from '../config/topics.js'
 import { agencyLevels, defaultAgencyLevel } from '../config/agencies.js'
 import { decodeGoogleNewsUrl } from './google-news.js'
@@ -354,7 +354,7 @@ async function backfillGnUrl(event, last) {
 						status: 'ok',
 						query,
 						source: gnResult.source,
-					}, `#${event.id} google news link backfilled (external)`, 'info')
+					}, '', 'info')
 					return true
 				}
 			}
@@ -385,7 +385,7 @@ async function backfillGnUrl(event, last) {
 			status: 'ok',
 			query: usedQuery || uniqueQueries[0],
 			source: best.source,
-		}, `#${event.id} google news link backfilled`, 'info')
+		}, '', 'info')
 	}
 	return changed
 }
@@ -591,6 +591,23 @@ function shouldVerify({ isFallback, textLength }) {
 
 function titleFor(event) {
 	return event.titleEn || event.titleRu || ''
+}
+
+function cloneEvent(event) {
+	let copy = { ...event }
+	if (Array.isArray(event?._articles)) {
+		copy._articles = event._articles.map(item => ({ ...item }))
+	}
+	if (Array.isArray(event?.articles)) {
+		copy.articles = event.articles.map(item => ({ ...item }))
+	}
+	return copy
+}
+
+function commitEvent(target, source) {
+	for (let [key, value] of Object.entries(source || {})) {
+		target[key] = value
+	}
 }
 
 function logEvent(event, data, message, level) {
@@ -866,317 +883,341 @@ function saveArticle(event, html, text) {
 }
 
 export async function summarize() {
-	news.forEach((e, i) => e.id ||= i + 1)
-	ensureColumns([
-		'titleEn',
-		'titleRu',
-		'gnUrl',
-		'url',
-		'source',
-		articlesColumn,
-		verifyStatusColumn,
-	])
+	pauseAutoSave()
+	try {
+		ensureColumns([
+			'titleEn',
+			'titleRu',
+			'gnUrl',
+			'url',
+			'source',
+			articlesColumn,
+			verifyStatusColumn,
+		])
 
-	let list = news.filter(e => {
-		if (!summarizeConfig.includeOtherTopics && e.topic === 'other') return false
-		if (summarizeConfig.forceResummarize) return true
-		if (!summarizeConfig.processVerifiedOk && String(e[verifyStatusColumn] || '').toLowerCase() === 'ok') return false
-		return !e.summary
-	})
+		let list = news.filter(e => {
+			if (String(e[verifyStatusColumn] || '').toLowerCase() === 'ok') return false
+			if (!summarizeConfig.includeOtherTopics && e.topic === 'other') return false
+			if (summarizeConfig.forceResummarize) return true
+			return !e.summary
+		})
 
-	let stats = { ok: 0, fail: 0 }
-	let failures = []
-	let externalSearchWarned = false
-	let last = {
-		urlDecode: { time: 0, delay: 30e3, increment: 1000, maxDelay: 60e3 },
-		ai: { time: 0, delay: 0 },
-		verify: { time: 0, delay: 1000 },
-		gnSearch: { time: 0, delay: 1000, increment: 0 },
-	}
-	let backfilled = 0
-	let backfilledGn = 0
-	for (let e of news) {
-		if (backfillMetaFromDisk(e)) backfilled++
-		if (await backfillGnUrl(e, last)) backfilledGn++
-	}
-	if (backfilled) log('backfilled metadata for', backfilled, 'rows')
-	if (backfilledGn) log('backfilled google news links for', backfilledGn, 'rows')
-	for (let i = 0; i < list.length; i++) {
-		let e = list[i]
-		e.url = normalizeUrl(e.url)
-		e.gnUrl = normalizeUrl(e.gnUrl)
-		await hydrateFromGoogleNews(e, last)
-		log(`\n#${e.id} [${i + 1}/${list.length}]`, titleFor(e))
-
-		if (!e.url /*&& !restricted.includes(e.source)*/) {
-			e.url = await decodeUrl(e.gnUrl, last)
-			if (!e.url) {
-				logEvent(e, {
-					phase: 'decode_url',
-					status: 'fail',
-				}, `#${e.id} url decode failed`, 'warn')
-				await sleep(5*60e3)
-				i--
+		let stats = { ok: 0, fail: 0 }
+		let failures = []
+		let externalSearchWarned = false
+		let last = {
+			urlDecode: { time: 0, delay: 30e3, increment: 1000, maxDelay: 60e3 },
+			ai: { time: 0, delay: 0 },
+			verify: { time: 0, delay: 1000 },
+			gnSearch: { time: 0, delay: 1000, increment: 0 },
+		}
+		let backfilled = 0
+		let backfilledGn = 0
+		for (let i = 0; i < list.length; i++) {
+			let base = list[i]
+			if (String(base?.[verifyStatusColumn] || '').toLowerCase() === 'ok') {
+				log(`#${base.id || i + 1} skipped (verifyStatus=ok)`)
 				continue
 			}
-			logEvent(e, {
-				phase: 'decode_url',
-				status: 'ok',
-				url: e.url,
-			}, `#${e.id} url decoded`, 'ok')
-			log('got', e.url)
-		}
+			let e = cloneEvent(base)
+			let rowIndex = news.indexOf(base) + 1
+			if (!e.id) e.id = base.id || rowIndex
+				if (backfillMetaFromDisk(e)) backfilled++
+				if (await backfillGnUrl(e, last)) backfilledGn++
+				e.url = normalizeUrl(e.url)
+				e.gnUrl = normalizeUrl(e.gnUrl)
+				await hydrateFromGoogleNews(e, last)
+				log(`\n#${e.id} [${i + 1}/${list.length}]`, titleFor(e))
 
-		let fetched = false
-		if (e.url) {
-			if (isBlank(e.source) && e.url && !e.url.includes('news.google.com')) {
-				let inferred = sourceFromUrl(e.url)
-				if (inferred) e.source = inferred
-			}
-			log('Fetching', e.source || '', 'article...')
-			let result = await fetchTextWithRetry(e, e.url, last)
-			if (result?.ok) {
-				log('got', result.text.length, 'chars')
-				saveArticle(e, result.html, result.text)
-				applyVerifyStatus(e, result.verify)
-				fetched = true
-			} else if (result?.mismatch) {
-				logEvent(e, {
-					phase: 'verify_mismatch',
-					status: 'fail',
-					pageSummary: result?.verify?.pageSummary,
-					reason: result?.verify?.reason,
-				}, `#${e.id} text mismatch, switching to fallback`, 'warn')
-			}
-		}
+				if (!e.url /*&& !restricted.includes(e.source)*/) {
+					e.url = await decodeUrl(e.gnUrl, last)
+					if (!e.url) {
+						logEvent(e, {
+							phase: 'decode_url',
+							status: 'fail',
+						}, `#${e.id} url decode failed`, 'warn')
+						await sleep(5*60e3)
+						i--
+						continue
+					}
+					logEvent(e, {
+						phase: 'decode_url',
+						status: 'ok',
+						url: e.url,
+					}, `#${e.id} url decoded`, 'ok')
+					log('got', e.url)
+				}
 
-		if (!fetched) {
-			let alternatives = getAlternativeArticles(e)
-			let shouldExpand = shouldExpandAlternatives(e, alternatives)
-			let shouldExternal = shouldExternalSearch(alternatives)
-			let externalResults = []
-			if (shouldExpand && !e._gnExpanded) {
-				let queries = buildFallbackSearchQueries(e)
-				if (queries.length) {
-					let totalAdded = 0
-					let usedQuery = ''
-					for (let query of queries) {
-						let results = await searchGoogleNews(query, last)
-						let extra = results.map(item => ({
-							titleEn: item.titleEn || '',
-							gnUrl: item.gnUrl || '',
-							source: item.source || '',
-						})).filter(item => item.gnUrl && item.source)
-						let added = mergeArticles(e, extra)
-						if (added) {
-							totalAdded += added
-							usedQuery = query
-							break
+				let fetched = false
+				if (e.url) {
+					if (isBlank(e.source) && e.url && !e.url.includes('news.google.com')) {
+						let inferred = sourceFromUrl(e.url)
+						if (inferred) e.source = inferred
+					}
+					log('Fetching', e.source || '', 'article...')
+					let result = await fetchTextWithRetry(e, e.url, last)
+					if (result?.ok) {
+						log('got', result.text.length, 'chars')
+						saveArticle(e, result.html, result.text)
+						applyVerifyStatus(e, result.verify)
+						fetched = true
+					} else if (result?.mismatch) {
+						logEvent(e, {
+							phase: 'verify_mismatch',
+							status: 'fail',
+							pageSummary: result?.verify?.pageSummary,
+							reason: result?.verify?.reason,
+						}, `#${e.id} text mismatch, switching to fallback`, 'warn')
+					}
+				}
+
+				if (!fetched) {
+					let alternatives = getAlternativeArticles(e)
+					let shouldExpand = shouldExpandAlternatives(e, alternatives)
+					let shouldExternal = shouldExternalSearch(alternatives)
+					let externalResults = []
+					if (shouldExpand && !e._gnExpanded) {
+						let queries = buildFallbackSearchQueries(e)
+						if (queries.length) {
+							let totalAdded = 0
+							let usedQuery = ''
+							for (let query of queries) {
+								let results = await searchGoogleNews(query, last)
+								let extra = results.map(item => ({
+									titleEn: item.titleEn || '',
+									gnUrl: item.gnUrl || '',
+									source: item.source || '',
+								})).filter(item => item.gnUrl && item.source)
+								let added = mergeArticles(e, extra)
+								if (added) {
+									totalAdded += added
+									usedQuery = query
+									break
+								}
+							}
+							e._gnExpanded = true
+							logEvent(e, {
+								phase: 'gn_search_expand',
+								status: totalAdded ? 'ok' : 'empty',
+								query: usedQuery || queries[0],
+								queries,
+								added: totalAdded,
+								total: getArticles(e).length,
+							}, `#${e.id} google news expand ${totalAdded ? `added ${totalAdded}` : 'no results'}`, totalAdded ? 'info' : 'warn')
+							alternatives = getAlternativeArticles(e)
+							shouldExpand = shouldExpandAlternatives(e, alternatives)
+							shouldExternal = shouldExternalSearch(alternatives)
 						}
 					}
-					e._gnExpanded = true
-					logEvent(e, {
-						phase: 'gn_search_expand',
-						status: totalAdded ? 'ok' : 'empty',
-						query: usedQuery || queries[0],
-						queries,
-						added: totalAdded,
-						total: getArticles(e).length,
-					}, `#${e.id} google news expand ${totalAdded ? `added ${totalAdded}` : 'no results'}`, totalAdded ? 'info' : 'warn')
-					alternatives = getAlternativeArticles(e)
-					shouldExpand = shouldExpandAlternatives(e, alternatives)
-					shouldExternal = shouldExternalSearch(alternatives)
-				}
-			}
-			if (shouldExternal && externalSearch?.enabled && !externalSearch.apiKey && !externalSearchWarned) {
-				log('external search disabled (missing SEARCH_API_KEY)')
-				externalSearchWarned = true
-			}
-			if (shouldExternal && !e._externalExpanded && externalSearch?.enabled && externalSearch.apiKey) {
-				let queries = buildFallbackSearchQueries(e)
-				if (queries.length) {
-					let totalAdded = 0
-					let usedQuery = ''
-					for (let query of queries) {
-						let results = await searchExternal(query)
-						if (results.length) externalResults = results
-						let added = mergeArticles(e, results)
-						if (added) {
-							totalAdded += added
-							usedQuery = query
-							break
+					if (shouldExternal && externalSearch?.enabled && !externalSearch.apiKey && !externalSearchWarned) {
+						log('external search disabled (missing SEARCH_API_KEY)')
+						externalSearchWarned = true
+					}
+					if (shouldExternal && !e._externalExpanded && externalSearch?.enabled && externalSearch.apiKey) {
+						let queries = buildFallbackSearchQueries(e)
+						if (queries.length) {
+							let totalAdded = 0
+							let usedQuery = ''
+							for (let query of queries) {
+								let results = await searchExternal(query)
+								if (results.length) externalResults = results
+								let added = mergeArticles(e, results)
+								if (added) {
+									totalAdded += added
+									usedQuery = query
+									break
+								}
+							}
+							e._externalExpanded = true
+							logEvent(e, {
+								phase: 'external_search',
+								status: totalAdded ? 'ok' : 'empty',
+								provider: externalSearch.provider,
+								query: usedQuery || queries[0],
+								queries,
+								added: totalAdded,
+								total: getArticles(e).length,
+							}, `#${e.id} external search ${totalAdded ? `added ${totalAdded}` : 'no results'}`, totalAdded ? 'info' : 'warn')
+							alternatives = getAlternativeArticles(e)
+							shouldExpand = shouldExpandAlternatives(e, alternatives)
 						}
 					}
-					e._externalExpanded = true
-					logEvent(e, {
-						phase: 'external_search',
-						status: totalAdded ? 'ok' : 'empty',
-						provider: externalSearch.provider,
-						query: usedQuery || queries[0],
-						queries,
-						added: totalAdded,
-						total: getArticles(e).length,
-					}, `#${e.id} external search ${totalAdded ? `added ${totalAdded}` : 'no results'}`, totalAdded ? 'info' : 'warn')
-					alternatives = getAlternativeArticles(e)
-					shouldExpand = shouldExpandAlternatives(e, alternatives)
-				}
-			}
-			if (!alternatives.length && externalResults.length) {
-				alternatives = buildExternalAlternatives(e, externalResults)
-			}
-			if (alternatives.length) {
-				let bySource = new Map()
-				for (let alt of alternatives) {
-					let key = normalizeSource(alt.source)
-					if (!key) continue
-					let existing = bySource.get(key)
-					if (!existing) {
-						bySource.set(key, { source: alt.source, level: alt.level, count: 1 })
+					if (!alternatives.length && externalResults.length) {
+						alternatives = buildExternalAlternatives(e, externalResults)
+					}
+					if (alternatives.length) {
+						let bySource = new Map()
+						for (let alt of alternatives) {
+							let key = normalizeSource(alt.source)
+							if (!key) continue
+							let existing = bySource.get(key)
+							if (!existing) {
+								bySource.set(key, { source: alt.source, level: alt.level, count: 1 })
+							} else {
+								existing.count += 1
+								existing.level = Math.max(existing.level, alt.level)
+							}
+						}
+						let sourceList = [...bySource.values()].sort((a, b) => b.level - a.level)
+						let listForLog = sourceList.slice(0, 12).map(item => `${item.source}(${item.level})${item.count > 1 ? `x${item.count}` : ''}`).join(', ')
+						let moreCount = sourceList.length - 12
+						logEvent(e, {
+							phase: 'fallback_candidates',
+							status: 'ok',
+							candidates: sourceList.map(a => ({ source: a.source, level: a.level, count: a.count })),
+						}, `#${e.id} fallback candidates: ${listForLog}${moreCount > 0 ? ` ... +${moreCount}` : ''}`, 'info')
 					} else {
-						existing.count += 1
-						existing.level = Math.max(existing.level, alt.level)
+						logEvent(e, {
+							phase: 'fallback_candidates',
+							status: 'empty',
+						}, `#${e.id} no fallback candidates`, 'warn')
+						let pool = getAlternativePool(e)
+						if (pool.length) {
+							logEvent(e, {
+								phase: 'fallback_pool',
+								status: 'ok',
+								candidates: pool.map(a => ({ source: a.source, level: a.level })),
+							}, `#${e.id} fallback pool: ${pool.map(a => `${a.source}(${a.level})`).join(', ')}`, 'info')
+						}
+					}
+					for (let j = 0; j < alternatives.length; j++) {
+						let alt = alternatives[j]
+						log('Trying alternative source', alt.source, `(level ${alt.level})...`)
+						let altUrl = normalizeUrl(alt.url)
+						let decodeMethod = altUrl ? 'direct' : 'gn'
+						if (!altUrl && alt.gnUrl) {
+							altUrl = await decodeUrl(alt.gnUrl, last)
+						}
+						if (!altUrl) {
+							logEvent(e, {
+								phase: 'fallback_decode',
+								status: 'fail',
+								candidateSource: alt.source,
+								level: alt.level,
+								method: decodeMethod,
+							}, `#${e.id} fallback decode failed (${alt.source})`, 'warn')
+							continue
+						}
+						logEvent(e, {
+							phase: 'fallback_decode',
+							status: 'ok',
+							candidateSource: alt.source,
+							level: alt.level,
+							method: decodeMethod,
+							url: altUrl,
+						}, `#${e.id} fallback url decoded (${alt.source})`, 'ok')
+						let result = await fetchTextWithRetry(e, altUrl, last, { isFallback: true })
+						if (result?.ok) {
+							if (alt.source) e.source = alt.source
+							if (!isBlank(alt.gnUrl)) e.gnUrl = alt.gnUrl
+							if (isBlank(e.titleEn) && !isBlank(alt.titleEn)) e.titleEn = alt.titleEn
+							e.url = altUrl
+							log('got', result.text.length, 'chars')
+							saveArticle(e, result.html, result.text)
+							applyVerifyStatus(e, result.verify)
+							fetched = true
+							logEvent(e, {
+								phase: 'fallback_selected',
+								status: 'ok',
+								candidateSource: alt.source,
+								level: alt.level,
+							}, `#${e.id} fallback selected ${alt.source}`, 'ok')
+							break
+						} else if (result?.mismatch) {
+							logEvent(e, {
+								phase: 'fallback_verify_mismatch',
+								status: 'fail',
+								candidateSource: alt.source,
+								level: alt.level,
+								pageSummary: result?.verify?.pageSummary,
+								reason: result?.verify?.reason,
+							}, `#${e.id} fallback text mismatch (${alt.source})`, 'warn')
+						}
+					}
+					if (!fetched) {
+						logEvent(e, {
+							phase: 'fallback_failed',
+							status: 'fail',
+						}, `#${e.id} fallback exhausted`, 'warn')
 					}
 				}
-				let sourceList = [...bySource.values()].sort((a, b) => b.level - a.level)
-				let listForLog = sourceList.slice(0, 12).map(item => `${item.source}(${item.level})${item.count > 1 ? `x${item.count}` : ''}`).join(', ')
-				let moreCount = sourceList.length - 12
-				logEvent(e, {
-					phase: 'fallback_candidates',
-					status: 'ok',
-					candidates: sourceList.map(a => ({ source: a.source, level: a.level, count: a.count })),
-				}, `#${e.id} fallback candidates: ${listForLog}${moreCount > 0 ? ` ... +${moreCount}` : ''}`, 'info')
-			} else {
-				logEvent(e, {
-					phase: 'fallback_candidates',
-					status: 'empty',
-				}, `#${e.id} no fallback candidates`, 'warn')
-				let pool = getAlternativePool(e)
-				if (pool.length) {
-					logEvent(e, {
-						phase: 'fallback_pool',
-						status: 'ok',
-						candidates: pool.map(a => ({ source: a.source, level: a.level })),
-					}, `#${e.id} fallback pool: ${pool.map(a => `${a.source}(${a.level})`).join(', ')}`, 'info')
-				}
-			}
-			for (let j = 0; j < alternatives.length; j++) {
-				let alt = alternatives[j]
-				log('Trying alternative source', alt.source, `(level ${alt.level})...`)
-				let altUrl = normalizeUrl(alt.url)
-				let decodeMethod = altUrl ? 'direct' : 'gn'
-				if (!altUrl && alt.gnUrl) {
-					altUrl = await decodeUrl(alt.gnUrl, last)
-				}
-				if (!altUrl) {
-					logEvent(e, {
-						phase: 'fallback_decode',
-						status: 'fail',
-						candidateSource: alt.source,
-						level: alt.level,
-						method: decodeMethod,
-					}, `#${e.id} fallback decode failed (${alt.source})`, 'warn')
-					continue
-				}
-				logEvent(e, {
-					phase: 'fallback_decode',
-					status: 'ok',
-					candidateSource: alt.source,
-					level: alt.level,
-					method: decodeMethod,
-					url: altUrl,
-				}, `#${e.id} fallback url decoded (${alt.source})`, 'ok')
-				let result = await fetchTextWithRetry(e, altUrl, last, { isFallback: true })
-				if (result?.ok) {
-					if (alt.source) e.source = alt.source
-					if (!isBlank(alt.gnUrl)) e.gnUrl = alt.gnUrl
-					if (isBlank(e.titleEn) && !isBlank(alt.titleEn)) e.titleEn = alt.titleEn
-					e.url = altUrl
-					log('got', result.text.length, 'chars')
-					saveArticle(e, result.html, result.text)
-					applyVerifyStatus(e, result.verify)
-					fetched = true
-					logEvent(e, {
-						phase: 'fallback_selected',
-						status: 'ok',
-						candidateSource: alt.source,
-						level: alt.level,
-					}, `#${e.id} fallback selected ${alt.source}`, 'ok')
-					break
-				} else if (result?.mismatch) {
-					logEvent(e, {
-						phase: 'fallback_verify_mismatch',
-						status: 'fail',
-						candidateSource: alt.source,
-						level: alt.level,
-						pageSummary: result?.verify?.pageSummary,
-						reason: result?.verify?.reason,
-					}, `#${e.id} fallback text mismatch (${alt.source})`, 'warn')
-				}
-			}
-			if (!fetched) {
-				logEvent(e, {
-					phase: 'fallback_failed',
-					status: 'fail',
-				}, `#${e.id} fallback exhausted`, 'warn')
-			}
-		}
 
-		if (e.text?.length > minTextLength) {
-			await sleep(last.ai.time + last.ai.delay - Date.now())
-			last.ai.time = Date.now()
-			log('Summarizing', e.text.length, 'chars...')
-			let res = await ai(e)
-			if (res) {
-				last.ai.delay = res.delay
-				e.topic ||= topicsMap[res.topic]
-				e.priority ||= res.priority
-				e.titleRu ||= res.titleRu
-				e.summary = res.summary
-				e.aiTopic = topicsMap[res.topic]
-				e.aiPriority = res.priority
+				if (e.text?.length > minTextLength) {
+					await sleep(last.ai.time + last.ai.delay - Date.now())
+					last.ai.time = Date.now()
+					log('Summarizing', e.text.length, 'chars...')
+					let res = await ai(e)
+					if (res) {
+						last.ai.delay = res.delay
+						e.topic ||= topicsMap[res.topic]
+						e.priority ||= res.priority
+						e.titleRu ||= res.titleRu
+						e.summary = res.summary
+						e.aiTopic = topicsMap[res.topic]
+						e.aiPriority = res.priority
+					}
+				}
+
+				if (!e.summary) {
+					logEvent(e, {
+						phase: 'summary',
+						status: 'missing',
+					}, `#${e.id} summary missing`, 'warn')
+					if (String(e[verifyStatusColumn] || '').toLowerCase() === 'ok') {
+						e[verifyStatusColumn] = ''
+					}
+					failures.push({
+						id: e.id,
+						title: titleFor(e),
+						source: e.source || '',
+						url: e.url || '',
+						phase: e._lastPhase || '',
+						status: e._lastStatus || '',
+						method: e._lastMethod || '',
+						reason: e._lastReason || '',
+					})
+					stats.fail++
+					commitEvent(base, e)
+					if (rowIndex > 0) {
+						await saveRowByIndex(rowIndex + 1, base)
+					} else {
+						log(`[warn] #${e.id} row index not found; save skipped`)
+					}
+				} else {
+					stats.ok++
+					commitEvent(base, e)
+					if (rowIndex > 0) {
+						await saveRowByIndex(rowIndex + 1, base)
+					} else {
+						log(`[warn] #${e.id} row index not found; save skipped`)
+					}
+				}
+		}
+		let order = e => (+e.sqk || 999) * 1000 + (topics[e.topic]?.id ?? 99) * 10 + (+e.priority || 10)
+		news.sort((a, b) => order(a) - order(b))
+
+		if (failures.length) {
+			let limit = summarizeConfig.failSummaryLimit || 0
+			log('\nFailed summaries:', failures.length)
+			let items = limit > 0 ? failures.slice(0, limit) : failures
+			for (let item of items) {
+				let meta = [item.phase, item.status, item.method].filter(Boolean).join('/')
+				let parts = [item.title, item.source, meta].filter(Boolean)
+				if (item.reason) parts.push(item.reason)
+				log(`[fail] #${item.id}`, parts.join(' | '))
+			}
+			if (limit > 0 && failures.length > limit) {
+				log(`... ${failures.length - limit} more`)
 			}
 		}
+		if (backfilled) log('backfilled metadata for', backfilled, 'rows')
+		if (backfilledGn) log('backfilled google news links for', backfilledGn, 'rows')
 
-		if (!e.summary) {
-			logEvent(e, {
-				phase: 'summary',
-				status: 'missing',
-			}, `#${e.id} summary missing`, 'warn')
-			failures.push({
-				id: e.id,
-				title: titleFor(e),
-				source: e.source || '',
-				url: e.url || '',
-				phase: e._lastPhase || '',
-				status: e._lastStatus || '',
-				method: e._lastMethod || '',
-				reason: e._lastReason || '',
-			})
-			stats.fail++
-		} else {
-			stats.ok++
-		}
+		finalyze()
+		log('\n', stats)
+	} finally {
+		await resumeAutoSave({ flush: false })
 	}
-	let order = e => (+e.sqk || 999) * 1000 + (topics[e.topic]?.id ?? 99) * 10 + (+e.priority || 10)
-	news.sort((a, b) => order(a) - order(b))
-
-	if (failures.length) {
-		let limit = summarizeConfig.failSummaryLimit || 0
-		log('\nFailed summaries:', failures.length)
-		let items = limit > 0 ? failures.slice(0, limit) : failures
-		for (let item of items) {
-			let meta = [item.phase, item.status, item.method].filter(Boolean).join('/')
-			let parts = [item.title, item.source, meta].filter(Boolean)
-			if (item.reason) parts.push(item.reason)
-			log(`[fail] #${item.id}`, parts.join(' | '))
-		}
-		if (limit > 0 && failures.length > limit) {
-			log(`... ${failures.length - limit} more`)
-		}
-	}
-
-	finalyze()
-	log('\n', stats)
 }
 
 if (process.argv[1].endsWith('summarize')) summarize()

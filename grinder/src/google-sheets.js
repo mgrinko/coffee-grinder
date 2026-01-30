@@ -1,6 +1,8 @@
 import Sheets from '@googleapis/sheets'
 
+import { log } from './log.js'
 import { auth } from './google-auth.js'
+import { sheetsConfig } from '../config/sheets.js'
 
 let sheets
 async function initialize() {
@@ -42,10 +44,48 @@ export async function loadTable(spreadsheetId, range) {
 export async function saveTable(spreadsheetId, range, data) {
 	let { headers } = data
 	await init
-	const updatedData = [
-		headers,
-		...data.map(o => headers.map(h => o[h] ?? '')),
-	]
+	const maxCellChars = sheetsConfig.maxCellChars
+	const dropOversize = sheetsConfig.dropOversize
+	const oversize = []
+	const updatedData = [headers]
+
+	for (let rowIndex = 0; rowIndex < data.length; rowIndex++) {
+		let row = []
+		let o = data[rowIndex]
+		let rowId = o?.id || o?.sqk || o?.url || ''
+		for (let h of headers) {
+			let value = o?.[h]
+			if (value === null || value === undefined) {
+				row.push('')
+				continue
+			}
+			if (typeof value === 'string' && value.length > maxCellChars) {
+				oversize.push({
+					row: rowIndex + 2,
+					column: h,
+					length: value.length,
+					id: rowId,
+				})
+				row.push(dropOversize ? '' : value)
+				continue
+			}
+			row.push(value)
+		}
+		updatedData.push(row)
+	}
+
+	if (oversize.length) {
+		log(`Oversized cells detected (${oversize.length}). Max is ${maxCellChars} chars.`)
+		for (let item of oversize.slice(0, sheetsConfig.oversizeLogLimit)) {
+			log(`Oversized cell row ${item.row} col "${item.column}" len ${item.length}${item.id ? ` id ${item.id}` : ''}`)
+		}
+		if (oversize.length > sheetsConfig.oversizeLogLimit) {
+			log(`Oversized cell log truncated (${oversize.length - sheetsConfig.oversizeLogLimit} more)`)
+		}
+		if (!dropOversize) {
+			throw new Error('Oversized cell(s) exceed Google Sheets limit. Set SHEETS_DROP_OVERSIZE=1 to drop.')
+		}
+	}
 	// log({ updatedData })
 	return await save(spreadsheetId, range, updatedData)
 }

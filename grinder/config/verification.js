@@ -4,4 +4,5 @@ export const verifyShortThreshold = 1200
 export const verifyFailOpen = true
 export const verifyMaxChars = 6000
 export const verifySummaryMaxChars = 200
-export const minAgencyLevel = 3
+export const minAgencyLevel = 0
+export const fallbackMinAgencyLevel = 0
